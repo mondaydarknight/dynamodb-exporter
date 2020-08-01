@@ -14,15 +14,15 @@ jobs:
           command: |
             pip --version
             pip install awscli --user
-      # - run:
-      #     name: Deploy CloudFormation template
-      #     command: |
-      #       ~/.local/bin/aws cloudformation deploy --stack-name ${AWS_CLOUDFORMATION_STACK} \
-      #         --region ${AWS_REGION} \
-      #         --capabilities CAPABILITY_NAMED_IAM \
-      #         --template-file ${AWS_CLOUDFORMATION_TEMPLATE_PATH} \
-      #         --parameter-overrides Environment=dev
-      #     no_output_timeout: 3600
+      - run:
+          name: Deploy CloudFormation template
+          command: |
+            ~/.local/bin/aws cloudformation deploy --stack-name ${AWS_CLOUDFORMATION_STACK} \
+              --region ${AWS_REGION} \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --template-file ${AWS_CLOUDFORMATION_TEMPLATE_PATH} \
+              --parameter-overrides Environment=dev
+          no_output_timeout: 3600
 
 workflows:
   version: 2
