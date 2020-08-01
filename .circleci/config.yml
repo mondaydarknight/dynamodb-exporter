@@ -1,12 +1,12 @@
-version: 2.1
+version: 2
 jobs:
   build_and_deploy:
     docker:
-      - image: circleci/python:3.8
+      - image: circleci/python:3.8.2
     environment:
       AWS_REGION: ap-northeast-1
       AWS_CLOUDFORMATION_STACK: cms-store-stack
-      AWS_CLOUDFORMATION_TEMPLATE_PATH: ${SOURCE_DIR}/data-pipeline.yaml
+      AWS_CLOUDFORMATION_TEMPLATE_PATH: data-pipeline.yaml
     steps:
       - checkout
       - run:
@@ -14,15 +14,15 @@ jobs:
           command: |
             pip --version
             pip install awscli --user
-      - run:
-          name: Deploy CloudFormation template
-          command: |
-            ~/.local/bin/aws cloudformation deploy --stack-name ${AWS_CLOUDFORMATION_STACK} \
-              --region ${AWS_REGION} \
-              --capabilities CAPABILITY_NAMED_IAM \
-              --template-file ${AWS_CLOUDFORMATION_TEMPLATE_PATH} \
-              --parameter-overrides Environment=dev
-          no_output_timeout: 3600
+      # - run:
+      #     name: Deploy CloudFormation template
+      #     command: |
+      #       ~/.local/bin/aws cloudformation deploy --stack-name ${AWS_CLOUDFORMATION_STACK} \
+      #         --region ${AWS_REGION} \
+      #         --capabilities CAPABILITY_NAMED_IAM \
+      #         --template-file ${AWS_CLOUDFORMATION_TEMPLATE_PATH} \
+      #         --parameter-overrides Environment=dev
+      #     no_output_timeout: 3600
 
 workflows:
   verison: 2
