@@ -1,0 +1,397 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Create a data pipeline to export DynamoDB records to S3 periodically and load data into Glue catalog.
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - beta
+      - prod
+  BucketName:
+    Type: String
+    Default: cms-dumper
+    Description: The S3 bucket name
+  ClusterInstanceType:
+    Type: String
+    Default: m5.xlarge
+    Description: The instance type of the EC2 instances of EMR cluster
+  DataPipelineName:
+    Type: String
+    Default: CommentDataPipelineExporter
+    Description: The data pipeline name export comments from DynamoDB to S3 bucket periodically
+  DataPipelineScheduleInterval:
+    Type: String
+    Default: 30 days
+    Description: An interval in days of data pipeline schedule
+  EmrReleaseVersion:
+    Type: String
+    Default: emr-5.29.0
+    Description: The release version of EMR cluster
+  TableName:
+    Type: String
+    Default: Comments
+    Description: The name of DynamoDB table which stores comment records
+  ReadThroughputPercent:
+    Description: DynamoDB read throughput percent
+    Type: Number
+    Default: 0.25
+    MinValue: 0.1
+    MaxValue: 1
+    ConstraintDescription: 'Must between 0.1 and 1'
+  VPCStackName:
+    Type: String
+    Description: The subnet ID of Vritual Private Cloud
+
+Resources:
+  DumpBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Ref BucketName
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - Authorization
+              - Content-*
+              - Date
+              - Expect
+              - host
+              - x-amz-*
+            AllowedMethods:
+              - POST
+              - PUT
+              - HEAD
+            ExposedHeaders:
+              - ETag
+              - x-amz-request-id
+          - AllowedOrigins:
+              - '*'
+            AllowedMethods:
+              - GET
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+            Status: Enabled
+  CommentTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: !Ref TableName
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: N
+        - AttributeName: createdTs
+          AttributeType: N
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: createdTs
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiredTs
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      BillingMode: PAY_PER_REQUEST
+  DataPipelineExporter:
+    Type: 'AWS::DataPipeline::Pipeline'
+    Properties:
+      Name: !Ref DataPipelineName
+      Description: Export comment records from DynamoDB to S3 bucket periodically
+      Activate: true
+      PipelineObjects:
+        - Id: Default
+          Name: Default
+          Fields:
+            - Key: failureAndRerunMode
+              StringValue: CASCADE
+            - Key: pipelineLogUri
+              StringValue: !Sub 's3://${BucketName}/data-pipelines/logs'
+            - Key: role
+              StringValue: !Ref DataPipelineDynamoDBExportRole
+            - Key: resourceRole
+              StringValue: !Ref EC2DynamoDBExportInstanceProfile
+            - Key: schedule
+              RefValue: DefaultSchedule
+            - Key: scheduleType
+              StringValue: cron
+            - Key: type
+              StringValue: Default
+        - Id: DDBExportFormat
+          Name: DDBExportFormat
+          Fields:
+            - Key: type
+              StringValue: DynamoDBDataFormat
+            - Key: column
+              StringValue: id BIGINT
+            - Key: column
+              StringValue: reason STRING
+            - Key: column
+              StringValue: detailReason STRING
+            - Key: column
+              StringValue: suggestion STRING
+            - Key: column
+              StringValue: createdTs BIGINT
+        - Id: S3ExportFormat
+          Name: S3ExportFormat
+          Fields:
+            - Key: type
+              StringValue: CSV
+            - Key: column
+              StringValue: id BIGINT
+            - Key: column
+              StringValue: reason STRING
+            - Key: column
+              StringValue: detailReason STRING
+            - Key: column
+              StringValue: suggestion STRING
+            - Key: column
+              StringValue: createdTs BIGINT
+        - Id: DefaultSchedule
+          Name: DefaultSchedule
+          Fields:
+            - Key: type
+              StringValue: Schedule
+            - Key: startAt
+              StringValue: FIRST_ACTIVATION_DATE_TIME
+            - Key: period
+              StringValue: !Ref DataPipelineScheduleInterval
+        - Id: DDBSourceTable
+          Name: DDBSourceTable
+          Fields:
+            - Key: readThroughputPercent
+              StringValue: !Ref ReadThroughputPercent
+            - Key: tableName
+              StringValue: !Ref TableName
+            - Key: type
+              StringValue: DynamoDBDataNode
+        - Id: S3BackupLocation
+          Name: S3BackupLocation
+          Fields:
+            - Key: type
+              StringValue: S3DataNode
+            - Key: directoryPath
+              StringValue: !Sub "s3://${BucketName}/Comment/#{format(@scheduledStartTime, 'YYYY-MM-dd-HH-mm-ss')}"
+            - Key: dataFormat
+              RefValue: S3ExportFormat
+        - Id: EmrClusterForBackup
+          Name: EmrClusterForBackup
+          Fields:
+            - Key: applications
+              StringValue: hive
+            - Key: coreInstanceCount
+              StringValue: 1
+            - Key: coreInstanceType
+              StringValue: !Ref ClusterInstanceType
+            - Key: terminateAfter
+              StringValue: 8 hours
+            - Key: type
+              StringValue: EmrCluster
+            - Key: region
+              StringValue: !Ref 'AWS::Region'
+            - Key: releaseLabel
+              StringValue: !Ref EmrReleaseVersion
+            - Key: masterInstanceType
+              StringValue: !Ref ClusterInstanceType
+            - Key: subnetId
+              StringValue:
+                Fn::ImportValue: !Sub '${VPCStackName}-PrivateSubnet1'
+        - Id: TableBackupActivity
+          Name: TableBackupActivity
+          Fields:
+            - Key: type
+              StringValue: HiveActivity
+            - Key: input
+              RefValue: DDBSourceTable
+            - Key: output
+              RefValue: S3BackupLocation
+            - Key: maximumRetries
+              StringValue: 2
+            - Key: resizeClusterBeforeRunning
+              StringValue: true
+            - Key: runsOn
+              RefValue: EmrClusterForBackup
+            - Key: hiveScript
+              StringValue: "INSERT OVERWRITE TABLE ${output1} SELECT id, reason, detailReason, suggestion, from_unixtime(createdTs) AS createdTs FROM ${input1} WHERE createdTs > unix_timestamp(\"${START_TIME}\",\"yyyy-MM-dd\");"
+            - Key: scriptVariable
+              StringValue: START_TIME=#{firstOfMonth(minusMonths(@scheduledStartTime,1))}
+  DataPipelineDynamoDBExportRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: DataPipelineDynamoDBExportRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - datapipeline.amazonaws.com
+                - elasticmapreduce.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSDataPipelineRole'
+  EC2DynamoDBExportRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: EC2DynamoDBExportRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - datapipeline.amazonaws.com
+                - ec2.amazonaws.com
+                - elasticmapreduce.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforDataPipelineRole'
+  EC2DynamoDBExportInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    DependsOn:
+      - EC2DynamoDBExportRole
+    Properties:
+      Roles:
+        - !Ref EC2DynamoDBExportRole
+  DynamoDBAccessRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: aws.cms.dynamodb.access
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - arn:aws:iam::799404451347:role/athenz-zts-service
+            Action:
+              - 'sts:AssumeRole'
+  DynamoDBAutoScalingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: DynamoDBAutoScalingRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+            Action:
+              - sts:AssumeRole
+  BucketPolicy:
+    DependsOn:
+      - Bucket
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: !Sub 'arn:aws:s3:::${DumpBucket}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+  DynamoDBCRUDPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: DynamoDBAccessPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:GetItem'
+              - 'dynamodb:PutItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+              - 'dynamodb:BatchWrite'
+            Resource:
+              - !GetAtt Table.Arn
+              - !Join
+                - ''
+                - - !GetAtt CommentTable.Arn
+                  - '/index/*'
+      Roles:
+        - !Ref DynamoDBAccessRole
+  DynamoDBAutoScalingPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: AutoScalingPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:DescribeTable'
+              - 'dynamodb:UpdateTable'
+              - 'cloudwatch:DescribeAlarms'
+              - 'cloudwatch:PutMetricAlarm'
+              - 'cloudwatch:GetMetricStatistics'
+              - 'cloudwatch:SetAlarmState'
+              - 'cloudwatch:DeleteAlarms'
+            Resource:
+              - '*'
+      Roles:
+        - !Ref DynamoDBAutoScalingRole
+  CommentReadScalingTable:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    Properties:
+      MinCapacity: 1
+      MaxCapacity: 10000
+      ResourceId: !Sub 'table/${CommentTable}'
+      RoleARN: !GetAtt DynamoDBAutoScalingRole.Arn
+      ScalableDimension: 'dynamodb:table:ReadCapacityUnits'
+      ServiceNamespace: dynamodb
+  CommentWriteScalingTable:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    Properties:
+      MaxCapacity: 10000
+      MinCapacity: 1
+      ResourceId: !Sub 'table/${CommentTable}'
+      RoleARN: !GetAtt DynamoDBAutoScalingRole.Arn
+      ScalableDimension: 'dynamodb:table:WriteCapacityUnits'
+      ServiceNamespace: dynamodb
+  CommentTableReadScalingPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: CommentTableReadScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref CommentReadScalingTable
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70.0
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 1
+        PredefinedMetricSpecification:
+          PredefinedMetricType: DynamoDBReadCapacityUtilization
+  CommentTableWriteScalingPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    DependsOn:
+      - CommentTableReadScalingPolicy
+    Properties:
+      PolicyName: CommentTableWriteScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref CommentWriteScalingTable
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70.0
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 1
+        PredefinedMetricSpecification:
+          PredefinedMetricType: DynamoDBWriteCapacityUtilization
+
+Outputs:
+  Bucket:
+    Description: The S3 bucket name
+    Export:
+      Name: !Sub '${AWS::StackName}-Bucket'
+    Value: !Ref DumpBucket
